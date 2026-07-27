@@ -24,10 +24,10 @@ st.set_page_config(
 NAVY = "#27235e"
 NAVY_LIGHT = "#3d3878"
 RED = "#ec3f3d"
-BG = "#0e0c22"          # dark navy background derived from NAVY
-CARD_BG = "#171438"
-TEXT = "#e8e8f0"
-MUTED = "#8a87ad"
+BG = "#ffffff"          # white background
+CARD_BG = "#f4f3fa"     # very light navy-tinted card background
+TEXT = "#27235e"        # navy text for contrast on white
+MUTED = "#6b6890"
 
 
 def md_html(text: str) -> str:
@@ -81,7 +81,7 @@ html, body, .stApp, p, span, div, label, li {{
 }}
 [data-testid="stMetricValue"] {{
     font-family: 'Poppins', sans-serif !important;
-    font-weight: 800 !important; color: #ffffff !important;
+    font-weight: 800 !important; color: {NAVY} !important;
 }}
 
 /* ── BUTTONS ── */
@@ -141,7 +141,7 @@ hr {{ border-color: rgba(236,63,61,0.10) !important; }}
 /* ── REUSABLE CLASSES ── */
 .sec-h {{
     font-family: 'Poppins', sans-serif !important; font-size: 1.25rem !important;
-    font-weight: 700 !important; color: #ffffff !important;
+    font-weight: 700 !important; color: {NAVY} !important;
     display: flex; align-items: center; gap: .6rem;
     margin: 2.2rem 0 1rem; padding: .4rem 0;
 }}
@@ -271,7 +271,7 @@ def render_header():
     <div style="text-align:center;padding:2.5rem 0 1.5rem">
         {logo_html}
         <h1 class="hero-title" style="font-family:'Poppins',sans-serif;font-size:clamp(1.8rem,4vw,2.6rem);
-                   font-weight:800;letter-spacing:-.02em;color:#ffffff;margin:0 0 .5rem">
+                   font-weight:800;letter-spacing:-.02em;color:{NAVY};margin:0 0 .5rem">
             Resume Screening Tool
         </h1>
         <p style="font-family:'DM Mono',monospace;font-size:.85rem;color:{MUTED};margin:0">
@@ -365,13 +365,13 @@ if analyze:
     bars = ax.barh(names, values, color=bcolors, height=0.55, zorder=3)
     ax.set_xlim(0, 100)
     ax.set_xlabel("Match Score (%)", color=MUTED, fontsize=9, fontfamily="monospace")
-    ax.tick_params(colors="#c9c7de", labelsize=9)
+    ax.tick_params(colors=NAVY, labelsize=9)
     ax.spines[:].set_visible(False)
     ax.xaxis.grid(True, color=(1, 1, 1, 0.05), zorder=0)
     ax.set_axisbelow(True)
     for bar, val in zip(bars, values):
         ax.text(bar.get_width() + .8, bar.get_y() + bar.get_height() / 2,
-                 f"{val}%", va="center", ha="left", color="#c9c7de", fontsize=8, fontfamily="monospace")
+                 f"{val}%", va="center", ha="left", color=NAVY, fontsize=8, fontfamily="monospace")
     plt.tight_layout()
     st.pyplot(fig)
 
@@ -391,7 +391,7 @@ if analyze:
         st.markdown(md_html(f"""
         <div class="cand-card">
             <div style="font-family:'DM Mono',monospace;font-size:.65rem;letter-spacing:.12em;color:{MUTED}">RANK #{rank}</div>
-            <div style="font-family:'Poppins',sans-serif;font-size:1.1rem;font-weight:700;color:#e8e8f0;margin:.15rem 0 .6rem">{cname}</div>
+            <div style="font-family:'Poppins',sans-serif;font-size:1.1rem;font-weight:700;color:{NAVY};margin:.15rem 0 .6rem">{cname}</div>
             <div style="display:flex;align-items:center;gap:.8rem;margin-bottom:.9rem">
                 <div class="sbar-bg" style="flex:1">
                     <div class="sbar-fill" style="width:{fill}%;background:linear-gradient(90deg,{col},{col}88)"></div>
