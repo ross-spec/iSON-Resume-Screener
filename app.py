@@ -29,10 +29,23 @@ CARD_BG = "#171438"
 TEXT = "#e8e8f0"
 MUTED = "#8a87ad"
 
+
+def md_html(text: str) -> str:
+    """
+    Fully left-align every line of an HTML block before passing it to
+    st.markdown(). Without this, HTML written inside indented Python
+    blocks (functions, if-statements, loops) keeps that Python
+    indentation in the string — and Streamlit's underlying Markdown
+    parser treats any line indented 4+ spaces as a literal code block
+    instead of rendering it as HTML, causing raw tags to show on screen.
+    """
+    return "\n".join(line.lstrip() for line in text.strip("\n").split("\n"))
+
+
 # ══════════════════════════════════════════════════════════════════════
 # GLOBAL CSS — iSON Xperiences theme (navy + red)
 # ══════════════════════════════════════════════════════════════════════
-st.markdown(f"""
+st.markdown(md_html(f"""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&family=DM+Mono:wght@400;500&display=swap');
 
@@ -152,7 +165,7 @@ hr {{ border-color: rgba(236,63,61,0.10) !important; }}
 .sbar-bg {{ background: rgba(255,255,255,0.06); border-radius: 999px; height: 6px; overflow: hidden; }}
 .sbar-fill {{ height: 100%; border-radius: 999px; }}
 </style>
-""", unsafe_allow_html=True)
+"""), unsafe_allow_html=True)
 
 # ══════════════════════════════════════════════════════════════════════
 # OPTIONAL AI HELPERS (skill extraction / hiring notes)
@@ -254,7 +267,7 @@ def render_header():
             b64 = base64.b64encode(f.read()).decode()
         logo_html = f'<img src="data:image/png;base64,{b64}" style="height:52px;margin-bottom:1rem" />'
 
-    st.markdown(f"""
+    st.markdown(md_html(f"""
     <div style="text-align:center;padding:2.5rem 0 1.5rem">
         {logo_html}
         <h1 class="hero-title" style="font-family:'Poppins',sans-serif;font-size:clamp(1.8rem,4vw,2.6rem);
@@ -265,7 +278,7 @@ def render_header():
             Internal HR tool · Upload resumes, paste a job description, get ranked matches
         </p>
     </div>
-    """, unsafe_allow_html=True)
+    """), unsafe_allow_html=True)
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -276,7 +289,7 @@ render_header()
 col_hero, col_panel = st.columns([1, 1.15], gap="large")
 
 with col_hero:
-    st.markdown(f"""
+    st.markdown(md_html(f"""
     <div style="padding:1rem 0">
         <p style="font-family:'DM Mono',monospace;font-size:.75rem;color:{RED};
                   letter-spacing:.1em;text-transform:uppercase;margin-bottom:.6rem">
@@ -289,7 +302,7 @@ with col_hero:
             4. Export the ranked list to CSV to share with the hiring team
         </p>
     </div>
-    """, unsafe_allow_html=True)
+    """), unsafe_allow_html=True)
 
 with col_panel:
     st.markdown('<p class="block-title">📂 Resume Upload (PDF / DOCX)</p>', unsafe_allow_html=True)
@@ -327,7 +340,7 @@ if analyze:
 
     top = results[0]
     col = score_color(top[2])
-    st.markdown(f"""
+    st.markdown(md_html(f"""
     <div style="background:linear-gradient(120deg,rgba(236,63,61,0.10),rgba(39,35,94,0.25));
                 border:1px solid rgba(236,63,61,0.25);border-radius:14px;
                 padding:1.2rem 1.6rem;display:flex;align-items:center;gap:1rem;margin-bottom:1.5rem">
@@ -339,7 +352,7 @@ if analyze:
             </div>
         </div>
     </div>
-    """, unsafe_allow_html=True)
+    """), unsafe_allow_html=True)
 
     # Score chart
     st.markdown('<div class="sec-h">📈 Match Score Comparison</div>', unsafe_allow_html=True)
@@ -375,7 +388,7 @@ if analyze:
     for rank, (cname, text, score) in enumerate(results, 1):
         fill = int(score)
         col = score_color(score)
-        st.markdown(f"""
+        st.markdown(md_html(f"""
         <div class="cand-card">
             <div style="font-family:'DM Mono',monospace;font-size:.65rem;letter-spacing:.12em;color:{MUTED}">RANK #{rank}</div>
             <div style="font-family:'Poppins',sans-serif;font-size:1.1rem;font-weight:700;color:#e8e8f0;margin:.15rem 0 .6rem">{cname}</div>
@@ -385,7 +398,7 @@ if analyze:
                 </div>
                 <span style="font-family:'DM Mono',monospace;font-size:.82rem;color:{col};font-weight:600">{score}%</span>
             </div>
-        """, unsafe_allow_html=True)
+        """), unsafe_allow_html=True)
 
         if ai_available():
             with st.spinner(f"Extracting skills for {cname}..."):
@@ -400,7 +413,7 @@ if analyze:
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-st.markdown(f"""
+st.markdown(md_html(f"""
 <div style="text-align:center;margin-top:4rem;padding-top:2rem;
             border-top:1px solid rgba(236,63,61,0.08)">
     <span style="font-family:'DM Mono',monospace;font-size:.65rem;
@@ -408,4 +421,4 @@ st.markdown(f"""
         iSON Xperiences · Internal HR Tool
     </span>
 </div>
-""", unsafe_allow_html=True)
+"""), unsafe_allow_html=True)
