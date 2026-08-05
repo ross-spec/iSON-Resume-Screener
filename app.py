@@ -245,15 +245,18 @@ _RELEVANT_WORD = _spaced("relevant")
 
 _EXPLICIT_PATTERN = re.compile(
     r'(\d{1,2})\+?\s*(?:' + _YEAR_WORD + r'|' + _YR_WORD + r')\s*'
-    r'(?:' + _OF_WORD + r'\s*)?(?:' + _RELEVANT_WORD + r'\s*)?' + _EXPERIENCE_WORD
+    r'(?:' + _OF_WORD + r'\s*)?(?:' + _RELEVANT_WORD + r'\s*)?'
+    r'(?:\w+[\s\-]+){0,3}' + _EXPERIENCE_WORD
 )
 
-# Date-range prefix accepts EITHER a month name (with optional trailing spaces
-# from the same kerning issue) OR a plain numeric month like "05/" or "05-"
-# (e.g. "05/2022 - 03/2026" formatted date ranges), not just month names.
-_MONTH_PREFIX = r'(?:(?:' + MONTHS + r')[\s.]*|\d{1,2}\s*[/.\-]\s*)?'
+# Date-range prefix accepts a month name (also tolerating an apostrophe before
+# the year, e.g. "April'2018") OR a plain numeric month like "05/" or "05-".
+_MONTH_PREFIX = r'(?:(?:' + MONTHS + r')[\s.\'\u2019]*|\d{1,2}\s*[/.\-]\s*)?'
+# Separator between the two years accepts a dash OR the literal word "to"
+# (e.g. "March 2023 to Current"), not just a dash.
+_RANGE_SEP = r'\s*(?:-|\u2013|to)\s*'
 _RANGE_PATTERN = re.compile(
-    _MONTH_PREFIX + r'(\d{4})\s*[-\u2013]+\s*' + _MONTH_PREFIX + r'(\d{4}|present|current|till date|ongoing)',
+    _MONTH_PREFIX + r'(\d{4})' + _RANGE_SEP + _MONTH_PREFIX + r'(\d{4}|present|current|till date|ongoing)',
     re.IGNORECASE
 )
 
