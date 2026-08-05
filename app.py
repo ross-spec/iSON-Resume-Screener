@@ -229,6 +229,34 @@ RECOMMENDATION (1 sentence: Hire / Maybe / Skip + reason)
 # ══════════════════════════════════════════════════════════════════════
 MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december"
 
+def _spaced(word: str) -> str:
+    """Builds a regex that tolerates stray whitespace between every letter of
+    `word`. Some resume PDFs (especially design-tool exports like Canva) have
+    embedded fonts with kerning tables that make PyPDF2 insert extra spaces
+    mid-word on extraction — e.g. "years" comes out as "y ears". Without this,
+    a straightforward `years?` pattern silently fails to match on those files."""
+    return r'\s*'.join(list(word))
+
+_YEAR_WORD = r'(?:' + _spaced("years") + r'|' + _spaced("year") + r')'
+_YR_WORD = r'(?:' + _spaced("yrs") + r'|' + _spaced("yr") + r')'
+_EXPERIENCE_WORD = _spaced("experience")
+_OF_WORD = _spaced("of")
+_RELEVANT_WORD = _spaced("relevant")
+
+_EXPLICIT_PATTERN = re.compile(
+    r'(\d{1,2})\+?\s*(?:' + _YEAR_WORD + r'|' + _YR_WORD + r')\s*'
+    r'(?:' + _OF_WORD + r'\s*)?(?:' + _RELEVANT_WORD + r'\s*)?' + _EXPERIENCE_WORD
+)
+
+# Date-range prefix accepts EITHER a month name (with optional trailing spaces
+# from the same kerning issue) OR a plain numeric month like "05/" or "05-"
+# (e.g. "05/2022 - 03/2026" formatted date ranges), not just month names.
+_MONTH_PREFIX = r'(?:(?:' + MONTHS + r')[\s.]*|\d{1,2}\s*[/.\-]\s*)?'
+_RANGE_PATTERN = re.compile(
+    _MONTH_PREFIX + r'(\d{4})\s*[-\u2013]+\s*' + _MONTH_PREFIX + r'(\d{4}|present|current|till date|ongoing)',
+    re.IGNORECASE
+)
+
 def extract_experience_years(text: str) -> float:
     """
     Estimates total years of professional experience from resume text using
@@ -236,29 +264,24 @@ def extract_experience_years(text: str) -> float:
       1. An explicit stated figure, e.g. "5+ years of experience",
          "8 years experience" — most reliable when present.
       2. Date ranges in a work-history section, e.g. "Jan 2019 - Present",
-         "2018 - 2022" — summed as a fallback when no explicit figure exists.
-    Purely offline (regex only) — makes no AI/API call and costs nothing.
+         "2018 - 2022", "05/2022 - 03/2026" — summed as a fallback when no
+         explicit figure exists.
+    Both patterns tolerate stray whitespace inserted mid-word by PyPDF2 on
+    certain fonts. Purely offline (regex only) — no AI/API call, no cost.
     """
     t = text.lower()
 
-    # Strategy 1: explicit "X years of experience" style statement.
-    explicit = re.findall(r'(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s*)?(?:relevant\s*)?experience', t)
+    explicit = _EXPLICIT_PATTERN.findall(t)
     if explicit:
         return float(max(int(x) for x in explicit))
 
-    # Strategy 2: sum date ranges (handles "2019 - 2022", "2019-Present",
-    # "Jan 2019 - Dec 2022", "06/2019 - 08/2022").
     current_year = datetime.now().year
-    range_pattern = re.compile(
-        r'(?:(' + MONTHS + r')[\s.]*)?(\d{4})\s*[-\u2013to]+\s*(?:(' + MONTHS + r')[\s.]*)?(\d{4}|present|current|till date|ongoing)',
-        re.IGNORECASE
-    )
     total_months = 0
-    matches = range_pattern.findall(t)
-    for _, start_year, _, end_year in matches:
+    matches = _RANGE_PATTERN.findall(t)
+    for start_year, end_year in matches:
         start_year = int(start_year)
         end_year = current_year if end_year in ("present", "current", "till date", "ongoing") else int(end_year)
-        if 1970 <= start_year <= current_year and start_year <= end_year <= current_year:
+        if 1970 <= start_year <= current_year and start_year <= end_year <= current_year + 1:
             total_months += (end_year - start_year) * 12
 
     if total_months > 0:
