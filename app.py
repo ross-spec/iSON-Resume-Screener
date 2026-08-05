@@ -1,11 +1,13 @@
 import streamlit as st
 import os
+import re
 import base64
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import PyPDF2
 import docx2txt
+from datetime import datetime
 from sentence_transformers import SentenceTransformer, util
 
 # ══════════════════════════════════════════════════════════════════════
@@ -164,6 +166,11 @@ hr {{ border-color: rgba(236,63,61,0.10) !important; }}
 }}
 .sbar-bg {{ background: rgba(255,255,255,0.06); border-radius: 999px; height: 6px; overflow: hidden; }}
 .sbar-fill {{ height: 100%; border-radius: 999px; }}
+.exp-pill {{
+    display:inline-block; font-family:'DM Mono',monospace; font-size:.7rem;
+    background: rgba(39,35,94,0.08); color: {NAVY}; border-radius: 999px;
+    padding: .2rem .7rem; margin-left:.5rem;
+}}
 </style>
 """), unsafe_allow_html=True)
 
@@ -218,6 +225,58 @@ RECOMMENDATION (1 sentence: Hire / Maybe / Skip + reason)
 
 
 # ══════════════════════════════════════════════════════════════════════
+# EXPERIENCE EXTRACTION (offline, regex-based — no AI/API call)
+# ══════════════════════════════════════════════════════════════════════
+MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december"
+
+def extract_experience_years(text: str) -> float:
+    """
+    Estimates total years of professional experience from resume text using
+    two strategies, in priority order:
+      1. An explicit stated figure, e.g. "5+ years of experience",
+         "8 years experience" — most reliable when present.
+      2. Date ranges in a work-history section, e.g. "Jan 2019 - Present",
+         "2018 - 2022" — summed as a fallback when no explicit figure exists.
+    Purely offline (regex only) — makes no AI/API call and costs nothing.
+    """
+    t = text.lower()
+
+    # Strategy 1: explicit "X years of experience" style statement.
+    explicit = re.findall(r'(\d{1,2})\+?\s*(?:years?|yrs?)\s*(?:of\s*)?(?:relevant\s*)?experience', t)
+    if explicit:
+        return float(max(int(x) for x in explicit))
+
+    # Strategy 2: sum date ranges (handles "2019 - 2022", "2019-Present",
+    # "Jan 2019 - Dec 2022", "06/2019 - 08/2022").
+    current_year = datetime.now().year
+    range_pattern = re.compile(
+        r'(?:(' + MONTHS + r')[\s.]*)?(\d{4})\s*[-\u2013to]+\s*(?:(' + MONTHS + r')[\s.]*)?(\d{4}|present|current|till date|ongoing)',
+        re.IGNORECASE
+    )
+    total_months = 0
+    matches = range_pattern.findall(t)
+    for _, start_year, _, end_year in matches:
+        start_year = int(start_year)
+        end_year = current_year if end_year in ("present", "current", "till date", "ongoing") else int(end_year)
+        if 1970 <= start_year <= current_year and start_year <= end_year <= current_year:
+            total_months += (end_year - start_year) * 12
+
+    if total_months > 0:
+        # Cap at a sane ceiling — overlapping/duplicate entries can otherwise
+        # inflate this (e.g. education dates + work dates both matching).
+        return round(min(total_months / 12, 40), 1)
+
+    return 0.0
+
+
+def experience_score(years: float, cap_years: float = 10.0) -> float:
+    """Converts years of experience into a 0-100 score, capped at cap_years
+    so a 20-year veteran doesn't automatically dominate a role that only
+    needs ~10 years — beyond the cap, more experience stops adding score."""
+    return round(min(years, cap_years) / cap_years * 100, 1)
+
+
+# ══════════════════════════════════════════════════════════════════════
 # CORE MATCHING LOGIC (offline — sentence-transformers)
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_resource
@@ -235,17 +294,31 @@ def extract_text(file) -> str:
     return ""
 
 
-def compute_similarity(resume_texts, jd_text):
+def compute_similarity(resume_texts, jd_text, experience_weight: float = 0.3):
+    """
+    Returns candidates ranked by a COMPOSITE score:
+        composite = (1 - experience_weight) * semantic_match
+                  +      experience_weight   * experience_score
+
+    semantic_match: how closely resume wording matches the JD (0-100)
+    experience_score: years of experience detected, capped and scaled (0-100)
+
+    experience_weight defaults to 0.3 (30% experience / 70% semantic match) —
+    adjustable via the sidebar slider in the UI below.
+    """
     model = load_embed_model()
     jd_emb = model.encode(jd_text, convert_to_tensor=True)
     out = []
     for name, text in resume_texts:
         if not text.strip():
-            out.append((name, text, 0.0))
+            out.append((name, text, 0.0, 0.0, 0.0))
             continue
         emb = model.encode(text, convert_to_tensor=True)
-        score = round(util.cos_sim(jd_emb, emb).item() * 100, 1)
-        out.append((name, text, score))
+        semantic = round(util.cos_sim(jd_emb, emb).item() * 100, 1)
+        years = extract_experience_years(text)
+        exp_score = experience_score(years)
+        composite = round((1 - experience_weight) * semantic + experience_weight * exp_score, 1)
+        out.append((name, text, composite, semantic, years))
     return sorted(out, key=lambda x: x[2], reverse=True)
 
 
@@ -298,7 +371,7 @@ with col_hero:
         <p style="font-family:'Poppins',sans-serif;font-size:.95rem;color:{MUTED};line-height:1.8">
             1. Upload candidate resumes (PDF or DOCX)<br>
             2. Paste the job description for the role<br>
-            3. Click Analyze — candidates are ranked by AI semantic match<br>
+            3. Click Analyze — candidates are ranked by JD match + experience<br>
             4. Export the ranked list to CSV to share with the hiring team
         </p>
     </div>
@@ -313,6 +386,12 @@ with col_panel:
     jd_input = st.text_area("JD", height=180, label_visibility="collapsed",
                              placeholder="Paste the full job description here...")
     st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown('<p class="block-title">⚖️ Experience Weight in Final Score</p>', unsafe_allow_html=True)
+    exp_weight_pct = st.slider("Experience weight", 0, 100, 30, step=5,
+                                label_visibility="collapsed",
+                                help="How much weight years-of-experience gets vs. JD wording match. "
+                                     "0% = pure semantic match (old behavior). 30% = default, balanced.")
+    st.markdown("<br>", unsafe_allow_html=True)
     analyze = st.button("⚡  Analyze Candidates", use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════
@@ -325,7 +404,7 @@ if analyze:
 
     with st.spinner("Running semantic AI analysis..."):
         resume_texts = [(f.name, extract_text(f)) for f in resume_files]
-        results = compute_similarity(resume_texts, jd_input)
+        results = compute_similarity(resume_texts, jd_input, experience_weight=exp_weight_pct / 100)
 
     scores = [r[2] for r in results]
     avg_score = round(float(np.mean(scores)), 1)
@@ -348,14 +427,21 @@ if analyze:
         <div>
             <div style="font-family:'Poppins',sans-serif;font-size:1.2rem;font-weight:700;color:{col}">{top[0]}</div>
             <div style="font-family:'DM Mono',monospace;font-size:.75rem;color:{MUTED}">
-                Best overall match · {top[2]}% similarity
+                Best overall match · {top[2]}% composite (JD match {top[3]}% · ~{top[4]:g} yrs experience)
             </div>
         </div>
     </div>
     """), unsafe_allow_html=True)
 
+    st.warning(
+        "⚠️ **\"Experience (yrs)\" is an automated estimate**, detected from wording and date "
+        "ranges in each resume — not a guaranteed-accurate reading. Formatting differences between "
+        "resumes can cause it to under- or over-detect. Please verify actual years of experience "
+        "against the resume itself before making any hiring decision based on this number."
+    )
+
     # Score chart
-    st.markdown('<div class="sec-h">📈 Match Score Comparison</div>', unsafe_allow_html=True)
+    st.markdown('<div class="sec-h">📈 Composite Score Comparison</div>', unsafe_allow_html=True)
     names = [r[0] for r in results]
     values = [r[2] for r in results]
     bcolors = [score_color(v) for v in values]
@@ -364,7 +450,7 @@ if analyze:
     ax.set_facecolor(CARD_BG)
     bars = ax.barh(names, values, color=bcolors, height=0.55, zorder=3)
     ax.set_xlim(0, 100)
-    ax.set_xlabel("Match Score (%)", color=MUTED, fontsize=9, fontfamily="monospace")
+    ax.set_xlabel("Composite Score (%)", color=MUTED, fontsize=9, fontfamily="monospace")
     ax.tick_params(colors=NAVY, labelsize=9)
     ax.spines[:].set_visible(False)
     ax.xaxis.grid(True, color=(1, 1, 1, 0.05), zorder=0)
@@ -377,26 +463,32 @@ if analyze:
 
     # Ranking table + export
     st.markdown('<div class="sec-h">🗂 Candidate Ranking</div>', unsafe_allow_html=True)
-    df = pd.DataFrame([(i + 1, r[0], f"{r[2]}%") for i, r in enumerate(results)],
-                       columns=["Rank", "Candidate", "Match Score"])
+    df = pd.DataFrame(
+        [(i + 1, r[0], f"{r[2]}%", f"{r[3]}%", f"{r[4]:g}") for i, r in enumerate(results)],
+        columns=["Rank", "Candidate", "Composite Score", "JD Match", "Experience (yrs)"]
+    )
     st.dataframe(df, use_container_width=True, hide_index=True)
     st.download_button("📥 Export CSV", df.to_csv(index=False).encode("utf-8"),
                         "candidate_ranking.csv", "text/csv")
 
     # Candidate deep-dive
     st.markdown('<div class="sec-h">🔬 Candidate Analysis</div>', unsafe_allow_html=True)
-    for rank, (cname, text, score) in enumerate(results, 1):
-        fill = int(score)
-        col = score_color(score)
+    for rank, (cname, text, composite, semantic, years) in enumerate(results, 1):
+        fill = int(composite)
+        col = score_color(composite)
         st.markdown(md_html(f"""
         <div class="cand-card">
             <div style="font-family:'DM Mono',monospace;font-size:.65rem;letter-spacing:.12em;color:{MUTED}">RANK #{rank}</div>
-            <div style="font-family:'Poppins',sans-serif;font-size:1.1rem;font-weight:700;color:{NAVY};margin:.15rem 0 .6rem">{cname}</div>
+            <div style="font-family:'Poppins',sans-serif;font-size:1.1rem;font-weight:700;color:{NAVY};margin:.15rem 0 .6rem">
+                {cname}
+                <span class="exp-pill">~{years:g} yrs experience</span>
+                <span class="exp-pill">JD match {semantic}%</span>
+            </div>
             <div style="display:flex;align-items:center;gap:.8rem;margin-bottom:.9rem">
                 <div class="sbar-bg" style="flex:1">
                     <div class="sbar-fill" style="width:{fill}%;background:linear-gradient(90deg,{col},{col}88)"></div>
                 </div>
-                <span style="font-family:'DM Mono',monospace;font-size:.82rem;color:{col};font-weight:600">{score}%</span>
+                <span style="font-family:'DM Mono',monospace;font-size:.82rem;color:{col};font-weight:600">{composite}%</span>
             </div>
         """), unsafe_allow_html=True)
 
@@ -407,7 +499,7 @@ if analyze:
             st.markdown(f'<div class="skills-block">{skills}</div>', unsafe_allow_html=True)
 
             with st.spinner(f"Generating hiring notes for {cname}..."):
-                rec = generate_recommendation(jd_input, text, score)
+                rec = generate_recommendation(jd_input, text, composite)
             st.markdown('<div class="block-title">🤖 AI Hiring Notes</div>', unsafe_allow_html=True)
             st.markdown(f'<div class="rec-block">{rec}</div>', unsafe_allow_html=True)
 
