@@ -1,1 +1,8 @@
-[server] headless = true port = 8000 enableCORS = false enableXsrfProtection = false [browser] gatherUsageStats = false
+[server]
+headless = true
+port = 8000
+enableCORS = false
+enableXsrfProtection = false
+
+[browser]
+gatherUsageStats = false
