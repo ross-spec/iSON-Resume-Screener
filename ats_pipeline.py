@@ -9,11 +9,19 @@ it survives across sessions.
 Also offers a one-click import of the most recent Resume Screening run
 (tab 1) straight into a new or existing job's pipeline, at the "Screened"
 stage, carrying over each candidate's match score.
+
+Additionally supports bulk resume upload directly into a job's pipeline
+(auto-extracts name/email/phone/experience via resume_screening.py, HR
+reviews/edits before committing) and export of a job's pipeline to
+Excel or CSV.
 """
+import io
+
 import streamlit as st
 import pandas as pd
 
 import db
+import resume_screening
 from theme import md_html, NAVY, RED, MUTED, score_color
 
 db.init_db()
@@ -133,6 +141,91 @@ def render():
             else:
                 st.warning("Candidate name is required.")
 
+    # ── Bulk Resume Upload ───────────────────────────────────────
+    st.markdown("<br>", unsafe_allow_html=True)
+    with st.expander("📤 Bulk Upload Resumes to this Pipeline"):
+        st.caption(
+            "Upload multiple resumes and the system extracts name, email and phone for each "
+            "— review/correct below, then add them all at once. Optionally paste a job "
+            "description to also compute a match score."
+        )
+        bulk_files = st.file_uploader(
+            "Resumes (PDF / DOCX)", type=["pdf", "docx"], accept_multiple_files=True,
+            key=f"ats_bulk_files_{job['id']}"
+        )
+        bulk_jd = st.text_area(
+            "Job description (optional — adds a match score)", height=100,
+            key=f"ats_bulk_jd_{job['id']}",
+            placeholder="Paste the JD here to also rank these candidates by match score..."
+        )
+
+        extract_key = f"ats_bulk_extracted_{job['id']}"
+
+        if st.button("🔍 Extract Candidate Info", key=f"ats_bulk_extract_btn_{job['id']}"):
+            if not bulk_files:
+                st.warning("Upload at least one resume first.")
+                st.stop()
+            with st.spinner(f"Extracting info from {len(bulk_files)} resumes..."):
+                rows, raw_texts = [], {}
+                for f in bulk_files:
+                    text = resume_screening.extract_text(f)
+                    raw_texts[f.name] = text
+                    name = resume_screening.guess_candidate_name(
+                        text, resume_screening.clean_filename_as_name(f.name)
+                    )
+                    email, phone = resume_screening.extract_contact_info(text)
+                    years = resume_screening.extract_experience_years(text)
+                    rows.append({
+                        "Include": True, "Name": name, "Email": email, "Phone": phone,
+                        "Experience (yrs)": years, "File": f.name, "Match Score": None,
+                    })
+                if bulk_jd.strip():
+                    resume_texts = [(f.name, raw_texts[f.name]) for f in bulk_files]
+                    scored = resume_screening.compute_similarity(resume_texts, bulk_jd)
+                    scores_by_file = {name: composite for name, _t, composite, _s, _y in scored}
+                    for row in rows:
+                        row["Match Score"] = scores_by_file.get(row["File"])
+                st.session_state[extract_key] = rows
+
+        if extract_key in st.session_state:
+            st.markdown("**Review extracted candidates** — edit any field before adding:")
+            edited_df = st.data_editor(
+                pd.DataFrame(st.session_state[extract_key]),
+                use_container_width=True, hide_index=True, key=f"ats_bulk_editor_{job['id']}",
+                column_config={
+                    "Include": st.column_config.CheckboxColumn("Add?"),
+                    "Match Score": st.column_config.NumberColumn("Match Score (%)", disabled=True),
+                    "File": st.column_config.TextColumn("Source File", disabled=True),
+                }
+            )
+
+            bcol1, bcol2 = st.columns([1, 1])
+            with bcol1:
+                if st.button("✅ Add Selected to Pipeline", key=f"ats_bulk_commit_{job['id']}"):
+                    existing_emails = {c["email"].lower() for c in candidates if c["email"]}
+                    added, skipped = 0, 0
+                    for _, row in edited_df.iterrows():
+                        if not row["Include"] or not str(row["Name"]).strip():
+                            continue
+                        if row["Email"] and row["Email"].lower() in existing_emails:
+                            skipped += 1
+                            continue
+                        db.add_candidate(
+                            job["id"], row["Name"], row["Email"] or "", row["Phone"] or "",
+                            source="Bulk Upload",
+                            match_score=row["Match Score"] if pd.notna(row["Match Score"]) else None,
+                            stage="Applied",
+                            notes=f"~{row['Experience (yrs)']:g} yrs experience (auto-detected)."
+                        )
+                        added += 1
+                    del st.session_state[extract_key]
+                    st.success(f"Added {added} candidate(s)." + (f" Skipped {skipped} duplicate email(s)." if skipped else ""))
+                    st.rerun()
+            with bcol2:
+                if st.button("✖ Discard", key=f"ats_bulk_discard_{job['id']}"):
+                    del st.session_state[extract_key]
+                    st.rerun()
+
     # ── Kanban board ─────────────────────────────────────────────
     st.markdown("<br>", unsafe_allow_html=True)
     board_cols = st.columns(len(db.STAGES))
@@ -191,6 +284,27 @@ def render():
             "Notes": c["notes"], "Added": c["added_date"], "Last Updated": c["updated_date"],
         } for c in candidates])
         st.dataframe(df, use_container_width=True, hide_index=True)
-        st.download_button("📥 Export Pipeline CSV", df.to_csv(index=False).encode("utf-8"),
-                            f"{job['title'].replace(' ', '_')}_pipeline.csv", "text/csv",
-                            key="ats_export_csv")
+
+        excel_buf = io.BytesIO()
+        with pd.ExcelWriter(excel_buf, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Pipeline")
+            ws = writer.sheets["Pipeline"]
+            for i, col in enumerate(df.columns, start=1):
+                max_len = max(df[col].astype(str).map(len).max(), len(col)) + 2
+                ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = min(max_len, 40)
+        excel_buf.seek(0)
+
+        exp_col1, exp_col2 = st.columns(2)
+        with exp_col1:
+            st.download_button(
+                "📊 Export Pipeline (Excel)", excel_buf,
+                f"{job['title'].replace(' ', '_')}_pipeline.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="ats_export_xlsx"
+            )
+        with exp_col2:
+            st.download_button(
+                "📥 Export Pipeline (CSV)", df.to_csv(index=False).encode("utf-8"),
+                f"{job['title'].replace(' ', '_')}_pipeline.csv", "text/csv",
+                key="ats_export_csv"
+            )
