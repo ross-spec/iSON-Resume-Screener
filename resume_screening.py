@@ -140,6 +140,57 @@ def experience_score(years: float, cap_years: float = 10.0) -> float:
 
 
 # ══════════════════════════════════════════════════════════════════════
+# CONTACT / NAME EXTRACTION (offline, regex + heuristics — no AI/API call)
+# Used by the ATS "Bulk Upload" flow to pre-fill candidate fields from a
+# raw resume upload. Best-effort only — the bulk upload UI always shows an
+# editable review table before anything is committed to the pipeline.
+# ══════════════════════════════════════════════════════════════════════
+_EMAIL_PATTERN = re.compile(r'[\w\.\+-]+@[\w-]+\.[\w\.-]+')
+_PHONE_PATTERN = re.compile(r'(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{3,5}\)?[-.\s]?)?\d{3,4}[-.\s]?\d{3,4}')
+
+
+def extract_contact_info(text: str):
+    """Best-effort email/phone extraction from resume text.
+    Returns (email, phone); either may be '' if nothing plausible was found."""
+    email_match = _EMAIL_PATTERN.search(text)
+    email = email_match.group(0) if email_match else ""
+
+    phone = ""
+    for candidate in _PHONE_PATTERN.findall(text):
+        digits = re.sub(r'\D', '', candidate)
+        if 10 <= len(digits) <= 13:
+            phone = candidate.strip()
+            break
+    return email, phone
+
+
+def clean_filename_as_name(filename: str) -> str:
+    """Turns a resume filename like 'john_doe_resume.pdf' into 'John Doe
+    Resume' — used as a fallback candidate name when nothing name-shaped
+    is found in the document body."""
+    base = os.path.splitext(filename)[0]
+    base = re.sub(r'[_\-]+', ' ', base)
+    base = re.sub(r'\s+', ' ', base).strip()
+    return base.title() if base else filename
+
+
+def guess_candidate_name(text: str, fallback: str) -> str:
+    """Best-effort name guess from the resume's first few lines; falls back
+    to a cleaned-up filename if nothing name-shaped is found. Heuristic
+    only — always shown in an editable table before being saved."""
+    for line in text.strip().splitlines()[:5]:
+        line = line.strip()
+        if not line or len(line) > 40 or any(ch.isdigit() for ch in line) or "@" in line:
+            continue
+        if any(w in line.lower() for w in ["resume", "curriculum", "cv", "phone", "email", "address"]):
+            continue
+        words = line.split()
+        if 1 <= len(words) <= 4 and all(w[0].isupper() for w in words if w[0].isalpha()):
+            return line
+    return fallback
+
+
+# ══════════════════════════════════════════════════════════════════════
 # CORE MATCHING LOGIC (offline — sentence-transformers)
 # ══════════════════════════════════════════════════════════════════════
 @st.cache_resource
