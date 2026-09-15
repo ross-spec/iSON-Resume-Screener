@@ -1,11 +1,33 @@
 """
 Tab 1 — Resume Screening.
+
 This is the existing offline resume-vs-JD matching tool, unchanged in logic,
 refactored into a render() function so it can live inside a tab alongside
 the ATS / Hiring Process module.
+
+v2 CHANGE — OCR fallback for image-based / flattened PDFs:
+  Some resumes (typically exported from design tools like Canva, or a
+  scanned/flattened print-to-PDF) have NO real text layer at all — PyPDF2
+  returns an empty string because there is nothing to extract; there are
+  no character objects in the PDF, only rendered pixels. Previously this
+  silently produced an empty resume text, which meant:
+    - extract_contact_info() found no email/phone (nothing to search)
+    - guess_candidate_name() had no lines to scan, so it fell back to the
+      filename — which is why names like "Transtion_SharathDS_14y_0m_"
+      showed up in the ATS review table instead of the real name.
+  Fixed by detecting this case (text length below a small threshold) and
+  falling back to rendering each page to an image and running OCR
+  (PyMuPDF + pytesseract) on it. This is only attempted when the direct
+  text layer is missing/too short, so normal PDFs are unaffected and stay
+  fast. If OCR isn't available in the deployment environment (missing
+  pytesseract/PyMuPDF or the system 'tesseract' binary), the code degrades
+  gracefully back to the original text (possibly empty), it never errors.
 """
+
+import io
 import os
 import re
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -13,9 +35,29 @@ import streamlit as st
 import PyPDF2
 import docx2txt
 from datetime import datetime
+
 from sentence_transformers import SentenceTransformer, util
 
 from theme import md_html, NAVY, RED, MUTED, CARD_BG, BG, score_color
+
+# ══════════════════════════════════════════════════════════════════════
+# OPTIONAL: OCR fallback for PDFs with no real text layer
+# Requires PyMuPDF (fitz), pytesseract, and Pillow — plus the system
+# 'tesseract-ocr' binary on the host. If any of these are missing, OCR is
+# silently skipped and the original (possibly empty) text is used instead.
+# ══════════════════════════════════════════════════════════════════════
+try:
+    import fitz  # PyMuPDF
+    import pytesseract
+    from PIL import Image
+    _OCR_AVAILABLE = True
+except Exception:
+    _OCR_AVAILABLE = False
+
+# Minimum number of non-whitespace characters a direct text-layer
+# extraction must produce before we trust it over attempting OCR.
+_OCR_FALLBACK_THRESHOLD = 30
+_OCR_DPI = 200
 
 # ══════════════════════════════════════════════════════════════════════
 # OPTIONAL AI HELPERS (skill extraction / hiring notes)
@@ -50,6 +92,7 @@ def extract_skills(text):
     return call_ai(f"""
 Extract the top 8-10 professional skills from this resume.
 Return ONLY a clean bullet list, no preamble.
+
 Resume: {text[:2500]}
 """)
 
@@ -57,9 +100,11 @@ Resume: {text[:2500]}
 def generate_recommendation(jd, resume, score):
     return call_ai(f"""
 You are a senior hiring manager. Analyse this candidate concisely.
+
 Match Score: {score}%
 Job Description: {jd[:1200]}
 Resume: {resume[:1800]}
+
 Return three short sections:
 STRENGTHS (2-3 bullets)
 GAPS (2-3 bullets)
@@ -72,6 +117,7 @@ RECOMMENDATION (1 sentence: Hire / Maybe / Skip + reason)
 # ══════════════════════════════════════════════════════════════════════
 MONTHS = "jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|january|february|march|april|june|july|august|september|october|november|december"
 
+
 def _spaced(word: str) -> str:
     """Builds a regex that tolerates stray whitespace between every letter of
     `word`. Some resume PDFs (especially design-tool exports like Canva) have
@@ -79,6 +125,7 @@ def _spaced(word: str) -> str:
     mid-word on extraction — e.g. "years" comes out as "y ears". Without this,
     a straightforward `years?` pattern silently fails to match on those files."""
     return r'\s*'.join(list(word))
+
 
 _YEAR_WORD = r'(?:' + _spaced("years") + r'|' + _spaced("year") + r')'
 _YR_WORD = r'(?:' + _spaced("yrs") + r'|' + _spaced("yr") + r')'
@@ -99,6 +146,7 @@ _RANGE_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+
 def extract_experience_years(text: str) -> float:
     """
     Estimates total years of professional experience from resume text using
@@ -112,7 +160,6 @@ def extract_experience_years(text: str) -> float:
     certain fonts. Purely offline (regex only) — no AI/API call, no cost.
     """
     t = text.lower()
-
     explicit = _EXPLICIT_PATTERN.findall(t)
     if explicit:
         return float(max(int(x) for x in explicit))
@@ -128,7 +175,6 @@ def extract_experience_years(text: str) -> float:
 
     if total_months > 0:
         return round(min(total_months / 12, 40), 1)
-
     return 0.0
 
 
@@ -161,24 +207,32 @@ def extract_contact_info(text: str):
         if 10 <= len(digits) <= 13:
             phone = candidate.strip()
             break
+
     return email, phone
 
 
 def clean_filename_as_name(filename: str) -> str:
     """Turns a resume filename like 'john_doe_resume.pdf' into 'John Doe
-    Resume' — used as a fallback candidate name when nothing name-shaped
-    is found in the document body."""
+    Resume' — used ONLY as an absolute last-resort candidate name, when the
+    document body genuinely yields nothing name-shaped even after the OCR
+    fallback in extract_text_with_method(). Should rarely trigger now."""
     base = os.path.splitext(filename)[0]
     base = re.sub(r'[_\-]+', ' ', base)
     base = re.sub(r'\s+', ' ', base).strip()
     return base.title() if base else filename
 
 
-def guess_candidate_name(text: str, fallback: str) -> str:
-    """Best-effort name guess from the resume's first few lines; falls back
-    to a cleaned-up filename if nothing name-shaped is found. Heuristic
-    only — always shown in an editable table before being saved."""
-    for line in text.strip().splitlines()[:5]:
+def guess_candidate_name(text: str, fallback: str):
+    """Best-effort name guess from the resume's first several lines.
+    Returns (name, from_filename) — from_filename is True only when the
+    filename fallback was actually used, so callers (the ATS bulk-upload
+    review table) can flag it for the reviewer instead of presenting a
+    filename-derived guess as if it were read from the document.
+
+    Scans the first 10 lines (raised from 5) since OCR'd text can have a
+    couple of noisy/garbled lines (icons, stray symbols) before the real
+    name line."""
+    for line in text.strip().splitlines()[:10]:
         line = line.strip()
         if not line or len(line) > 40 or any(ch.isdigit() for ch in line) or "@" in line:
             continue
@@ -186,8 +240,9 @@ def guess_candidate_name(text: str, fallback: str) -> str:
             continue
         words = line.split()
         if 1 <= len(words) <= 4 and all(w[0].isupper() for w in words if w[0].isalpha()):
-            return line
-    return fallback
+            return line, False
+
+    return fallback, True
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -198,24 +253,85 @@ def load_embed_model():
     return SentenceTransformer("all-MiniLM-L6-v2")
 
 
-def extract_text(file) -> str:
+def _ocr_pdf(file) -> str:
+    """Renders every page of a PDF to an image and OCRs it. Returns '' on
+    any failure (missing OCR deps, corrupt file, missing tesseract binary,
+    etc.) rather than raising — this is always a fallback path, never the
+    only way to get text, so it must fail quietly."""
+    if not _OCR_AVAILABLE:
+        return ""
+    try:
+        file.seek(0)
+        doc = fitz.open(stream=file.read(), filetype="pdf")
+        pages_text = []
+        for page in doc:
+            pix = page.get_pixmap(dpi=_OCR_DPI)
+            img = Image.open(io.BytesIO(pix.tobytes("png")))
+            pages_text.append(pytesseract.image_to_string(img))
+        doc.close()
+        return "\n".join(pages_text)
+    except Exception:
+        return ""
+
+
+def extract_text_with_method(file):
+    """
+    Reads the FULL document and returns (text, method), where method is:
+      "text" — read directly from the PDF/DOCX text layer (fast, the normal
+               case for the vast majority of resumes)
+      "ocr"  — the PDF had no usable text layer (a scanned or flattened /
+               design-tool export with only rendered pixels, no character
+               data) so pages were rendered to images and OCR'd instead
+      "none" — nothing could be extracted either way
+
+    This is what fixes the "email/name came out blank" issue: previously,
+    a PDF with no text layer silently produced an empty string and every
+    downstream field (name, email, phone, experience) had nothing to work
+    with, which is why the name ended up guessed from the filename instead.
+    """
     ext = os.path.splitext(file.name)[1].lower()
-    if ext == ".pdf":
-        reader = PyPDF2.PdfReader(file)
-        return "".join(p.extract_text() or "" for p in reader.pages)
-    elif ext == ".docx":
-        return docx2txt.process(file)
-    return ""
+
+    if ext == ".docx":
+        file.seek(0)
+        text = docx2txt.process(file) or ""
+        return text, ("text" if text.strip() else "none")
+
+    if ext != ".pdf":
+        return "", "none"
+
+    file.seek(0)
+    reader = PyPDF2.PdfReader(file)
+    text = "".join(p.extract_text() or "" for p in reader.pages)
+
+    if len(text.strip()) >= _OCR_FALLBACK_THRESHOLD:
+        return text, "text"
+
+    # Text layer missing or suspiciously short — try OCR as a fallback.
+    ocr_text = _ocr_pdf(file)
+    if len(ocr_text.strip()) > len(text.strip()):
+        return ocr_text, "ocr"
+
+    return text, ("text" if text.strip() else "none")
+
+
+def extract_text(file) -> str:
+    """Back-compat wrapper — most callers just want the text and don't
+    need to know whether OCR kicked in. Use extract_text_with_method()
+    directly where that distinction matters (e.g. the ATS bulk upload
+    review table, which flags OCR'd resumes for a closer look)."""
+    text, _method = extract_text_with_method(file)
+    return text
 
 
 def compute_similarity(resume_texts, jd_text, experience_weight: float = 0.3):
     """
     Returns candidates ranked by a COMPOSITE score:
-        composite = (1 - experience_weight) * semantic_match
-                  +      experience_weight   * experience_score
+      composite = (1 - experience_weight) * semantic_match
+                + experience_weight * experience_score
     """
     model = load_embed_model()
     jd_emb = model.encode(jd_text, convert_to_tensor=True)
+
     out = []
     for name, text in resume_texts:
         if not text.strip():
@@ -227,6 +343,7 @@ def compute_similarity(resume_texts, jd_text, experience_weight: float = 0.3):
         exp_score = experience_score(years)
         composite = round((1 - experience_weight) * semantic + experience_weight * exp_score, 1)
         out.append((name, text, composite, semantic, years))
+
     return sorted(out, key=lambda x: x[2], reverse=True)
 
 
@@ -258,11 +375,13 @@ def render():
         resume_files = st.file_uploader("Resumes", type=["pdf", "docx"],
                                          accept_multiple_files=True, label_visibility="collapsed",
                                          key="rs_resume_files")
+
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<p class="block-title">📝 Job Description</p>', unsafe_allow_html=True)
         jd_input = st.text_area("JD", height=180, label_visibility="collapsed",
                                  placeholder="Paste the full job description here...",
                                  key="rs_jd_input")
+
         st.markdown("<br>", unsafe_allow_html=True)
         st.markdown('<p class="block-title">⚖️ Experience Weight in Final Score</p>', unsafe_allow_html=True)
         exp_weight_pct = st.slider("Experience weight", 0, 100, 30, step=5,
@@ -270,8 +389,9 @@ def render():
                                     help="How much weight years-of-experience gets vs. JD wording match. "
                                          "0% = pure semantic match. 30% = default, balanced.",
                                     key="rs_exp_weight")
+
         st.markdown("<br>", unsafe_allow_html=True)
-        analyze = st.button("⚡  Analyze Candidates", use_container_width=True, key="rs_analyze")
+        analyze = st.button("⚡ Analyze Candidates", use_container_width=True, key="rs_analyze")
 
     if analyze:
         if not resume_files or not jd_input.strip():
@@ -282,12 +402,12 @@ def render():
             resume_texts = [(f.name, extract_text(f)) for f in resume_files]
             results = compute_similarity(resume_texts, jd_input, experience_weight=exp_weight_pct / 100)
 
-        # Stash results in session_state so the ATS tab can offer a one-click
-        # import of this run's candidates into a hiring pipeline.
-        st.session_state["last_screening"] = {
-            "jd_snippet": jd_input.strip()[:120],
-            "results": [(r[0], r[2], r[3], r[4]) for r in results],  # name, composite, semantic, years
-        }
+            # Stash results in session_state so the ATS tab can offer a one-click
+            # import of this run's candidates into a hiring pipeline.
+            st.session_state["last_screening"] = {
+                "jd_snippet": jd_input.strip()[:120],
+                "results": [(r[0], r[2], r[3], r[4]) for r in results],  # name, composite, semantic, years
+            }
 
         scores = [r[2] for r in results]
         avg_score = round(float(np.mean(scores)), 1)
@@ -327,6 +447,7 @@ def render():
         names = [r[0] for r in results]
         values = [r[2] for r in results]
         bcolors = [score_color(v) for v in values]
+
         fig, ax = plt.subplots(figsize=(9, max(3, len(names) * 0.6)))
         fig.patch.set_facecolor(BG)
         ax.set_facecolor(CARD_BG)
