@@ -14,7 +14,16 @@ Additionally supports bulk resume upload directly into a job's pipeline
 (auto-extracts name/email/phone/experience via resume_screening.py, HR
 reviews/edits before committing) and export of a job's pipeline to
 Excel or CSV.
+
+v2 CHANGE — bulk upload now reads the whole document via
+resume_screening.extract_text_with_method(), which falls back to OCR when
+a PDF has no real text layer (common with design-tool exports / scanned
+resumes). The review table now also shows an "Extraction" column so HR can
+see at a glance which rows came from a full text read vs. OCR vs. (rarely,
+now) the filename — instead of a filename-derived guess being silently
+presented as if it were read from the document.
 """
+
 import io
 
 import streamlit as st
@@ -50,6 +59,7 @@ def render():
             new_dept = st.text_input("Department", key="ats_new_dept", placeholder="e.g. CX Operations")
         with c3:
             new_loc = st.text_input("Location", key="ats_new_loc", placeholder="e.g. Noida")
+
         if st.button("Create Job", key="ats_create_job"):
             if new_title.strip():
                 db.add_job(new_title, new_dept, new_loc)
@@ -68,14 +78,17 @@ def render():
         with st.expander("📥 Import candidates from last Resume Screening run", expanded=False):
             st.caption(f"Last JD screened: \u201c{last_screening['jd_snippet']}...\u201d "
                        f"· {len(last_screening['results'])} candidates ranked")
+
             target_options = ["— Create a new job —"] + [f"{j['title']} (#{j['id']})" for j in jobs]
             target = st.selectbox("Import into", target_options, key="ats_import_target")
+
             new_job_title_for_import = ""
             if target == "— Create a new job —":
                 new_job_title_for_import = st.text_input(
                     "New job title for imported candidates", key="ats_import_new_title",
                     placeholder="e.g. Role from latest screening run"
                 )
+
             if st.button("Import as 'Screened' candidates", key="ats_import_btn"):
                 if target == "— Create a new job —":
                     if not new_job_title_for_import.strip():
@@ -85,6 +98,7 @@ def render():
                     job_id = db.get_jobs()[0]["id"]  # most recently created
                 else:
                     job_id = int(target.split("#")[-1].rstrip(")"))
+
                 for name, composite, semantic, years in last_screening["results"]:
                     db.add_candidate(
                         job_id, name, source="Resume Screening",
@@ -132,6 +146,7 @@ def render():
             cand_phone = st.text_input("Phone", key="ats_cand_phone")
         with ac4:
             cand_stage = st.selectbox("Stage", db.STAGES, key="ats_cand_stage")
+
         if st.button("Add Candidate", key="ats_add_cand_btn"):
             if cand_name.strip():
                 db.add_candidate(job["id"], cand_name, cand_email, cand_phone,
@@ -145,10 +160,11 @@ def render():
     st.markdown("<br>", unsafe_allow_html=True)
     with st.expander("📤 Bulk Upload Resumes to this Pipeline"):
         st.caption(
-            "Upload multiple resumes and the system extracts name, email and phone for each "
-            "— review/correct below, then add them all at once. Optionally paste a job "
-            "description to also compute a match score."
+            "Upload multiple resumes and the system reads the full document to extract name, "
+            "email and phone for each — review/correct below, then add them all at once. "
+            "Optionally paste a job description to also compute a match score."
         )
+
         bulk_files = st.file_uploader(
             "Resumes (PDF / DOCX)", type=["pdf", "docx"], accept_multiple_files=True,
             key=f"ats_bulk_files_{job['id']}"
@@ -165,27 +181,52 @@ def render():
             if not bulk_files:
                 st.warning("Upload at least one resume first.")
                 st.stop()
+
             with st.spinner(f"Extracting info from {len(bulk_files)} resumes..."):
                 rows, raw_texts = [], {}
+                ocr_count = 0
+
                 for f in bulk_files:
-                    text = resume_screening.extract_text(f)
+                    text, method = resume_screening.extract_text_with_method(f)
                     raw_texts[f.name] = text
-                    name = resume_screening.guess_candidate_name(
+
+                    name, name_from_filename = resume_screening.guess_candidate_name(
                         text, resume_screening.clean_filename_as_name(f.name)
                     )
                     email, phone = resume_screening.extract_contact_info(text)
                     years = resume_screening.extract_experience_years(text)
+
+                    if method == "ocr":
+                        ocr_count += 1
+                        extraction_label = "🔎 OCR (scanned/flattened PDF — please verify)"
+                    elif method == "none":
+                        extraction_label = "⚠️ Could not read file — please fill in manually"
+                    else:
+                        extraction_label = "Text"
+
+                    if name_from_filename:
+                        extraction_label += " · name from filename"
+
                     rows.append({
                         "Include": True, "Name": name, "Email": email, "Phone": phone,
                         "Experience (yrs)": years, "File": f.name, "Match Score": None,
+                        "Extraction": extraction_label,
                     })
+
                 if bulk_jd.strip():
                     resume_texts = [(f.name, raw_texts[f.name]) for f in bulk_files]
                     scored = resume_screening.compute_similarity(resume_texts, bulk_jd)
                     scores_by_file = {name: composite for name, _t, composite, _s, _y in scored}
                     for row in rows:
                         row["Match Score"] = scores_by_file.get(row["File"])
+
                 st.session_state[extract_key] = rows
+                if ocr_count:
+                    st.info(
+                        f"{ocr_count} file(s) had no readable text layer and were processed via OCR "
+                        f"instead — please double-check those rows (flagged below) against the source PDF, "
+                        f"especially the phone number."
+                    )
 
         if extract_key in st.session_state:
             st.markdown("**Review extracted candidates** — edit any field before adding:")
@@ -196,6 +237,7 @@ def render():
                     "Include": st.column_config.CheckboxColumn("Add?"),
                     "Match Score": st.column_config.NumberColumn("Match Score (%)", disabled=True),
                     "File": st.column_config.TextColumn("Source File", disabled=True),
+                    "Extraction": st.column_config.TextColumn("Extraction", disabled=True),
                 }
             )
 
