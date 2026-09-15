@@ -6,3 +6,6 @@ numpy
 matplotlib
 sentence-transformers
 openpyxl
+PyMuPDF
+pytesseract
+Pillow
